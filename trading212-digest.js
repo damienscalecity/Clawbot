@@ -344,6 +344,8 @@ function formatPct(x){
         ticker,
         instrument: instr || p.instrument || null,
         quantity: p.quantity ?? null,
+        quantityAvailableForTrading: p.quantityAvailableForTrading ?? null,
+        quantityInPies: p.quantityInPies ?? null,
         currentPrice: p.currentPrice ?? null,
         averagePricePaid: p.averagePricePaid ?? null,
         walletImpact: p.walletImpact ?? null,
