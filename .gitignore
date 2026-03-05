@@ -1,0 +1,5 @@
+# OpenClaw workspace noise / secrets
+memory/
+*.lock
+.env
+.DS_Store
