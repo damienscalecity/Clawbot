@@ -319,6 +319,12 @@ async function placeMarketOrder(authHeader, ticker, quantity){
     writeJson(SENT_PATH, sent);
 
     if (resp.status < 200 || resp.status >= 300) {
+      // Common safe failure: trying to sell something that's not owned (portfolio changed since plan)
+      const errType = resp.json && resp.json.type;
+      if (resp.status === 400 && errType === '/api-errors/selling-equity-not-owned') {
+        console.error('ORDER_SKIPPED_NOT_OWNED', o.ticker);
+        continue;
+      }
       console.error('ORDER_FAILED', o.ticker, resp.status);
       process.exit(10);
     }
