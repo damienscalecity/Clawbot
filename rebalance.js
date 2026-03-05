@@ -209,22 +209,27 @@ function buildPlan(exportObj){
   // Build sells (sell full current quantity by using negative quantity equal to current quantity)
   // We need quantities: derive from export positionsRaw per ticker sum quantities.
   const qtyByTicker = new Map();
+  const qtyAvailByTicker = new Map();
   for (const r of exportObj.positionsRaw || []){
     const t = r.ticker;
     if (!t) continue;
     qtyByTicker.set(t, (qtyByTicker.get(t)||0) + Number(r.quantity||0));
+    if (r.quantityAvailableForTrading != null) {
+      qtyAvailByTicker.set(t, (qtyAvailByTicker.get(t)||0) + Number(r.quantityAvailableForTrading||0));
+    }
   }
 
   if (!FLAG_BUYS_ONLY) {
     for (const t of [...explicitSellTickers]){
-      const q = qtyByTicker.get(t) || 0;
+      const qAvail = (qtyAvailByTicker.has(t) ? qtyAvailByTicker.get(t) : null);
+      const q = (qAvail != null ? qAvail : (qtyByTicker.get(t) || 0));
       if (q > 0) plan.sells.push({ticker:t, quantity: -q});
     }
   }
 
-  // PLTR trim: target 5%
+  // PLTR trim: target 5% (can be disabled via STOP_PLTR=1)
   const pltr = byTicker.get('PLTR_US_EQ');
-  if (!FLAG_BUYS_ONLY && pltr){
+  if (!FLAG_BUYS_ONLY && process.env.STOP_PLTR !== '1' && pltr){
     const targetValue = total * 0.05;
     const excessValue = pltr.currentValue - targetValue;
     if (excessValue > 1){
