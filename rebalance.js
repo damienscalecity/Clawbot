@@ -336,6 +336,10 @@ async function placeMarketOrder(authHeader, ticker, quantity){
         console.error('ORDER_SKIPPED_NOT_OWNED', o.ticker);
         continue;
       }
+      if (resp.status === 400 && errType === '/api-errors/min-opened-position-exceeded') {
+        console.error('ORDER_SKIPPED_MIN_POSITION', o.ticker);
+        continue;
+      }
       console.error('ORDER_FAILED', o.ticker, resp.status);
       process.exit(10);
     }
