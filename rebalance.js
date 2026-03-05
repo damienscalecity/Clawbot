@@ -23,6 +23,8 @@ const SENT_PATH = path.resolve('/data/.openclaw/workspace/memory/orders-sent.jso
 
 const args = process.argv.slice(2);
 const FLAG_EXECUTE = args.includes('--execute');
+const FLAG_BUYS_ONLY = args.includes('--buys-only');
+const FLAG_SELLS_ONLY = args.includes('--sells-only');
 
 const key = process.env.TRADING212_KEY || process.env.TRADING212_API_KEY || process.env.T212_KEY;
 const secret = process.env.TRADING212_SECRET || process.env.TRADING212_SECRET_KEY || process.env.TRADING212_API_SECRET || process.env.T212_SECRET;
@@ -193,6 +195,7 @@ function buildPlan(exportObj){
 
   const plan = {
     createdAt: new Date().toISOString(),
+    mode: FLAG_BUYS_ONLY ? 'buys-only' : (FLAG_SELLS_ONLY ? 'sells-only' : 'full'),
     portfolioTotal: total,
     targetModel: buildTargets(),
     sells: [],
@@ -212,14 +215,16 @@ function buildPlan(exportObj){
     qtyByTicker.set(t, (qtyByTicker.get(t)||0) + Number(r.quantity||0));
   }
 
-  for (const t of [...explicitSellTickers]){
-    const q = qtyByTicker.get(t) || 0;
-    if (q > 0) plan.sells.push({ticker:t, quantity: -q});
+  if (!FLAG_BUYS_ONLY) {
+    for (const t of [...explicitSellTickers]){
+      const q = qtyByTicker.get(t) || 0;
+      if (q > 0) plan.sells.push({ticker:t, quantity: -q});
+    }
   }
 
   // PLTR trim: target 5%
   const pltr = byTicker.get('PLTR_US_EQ');
-  if (pltr){
+  if (!FLAG_BUYS_ONLY && pltr){
     const targetValue = total * 0.05;
     const excessValue = pltr.currentValue - targetValue;
     if (excessValue > 1){
@@ -238,7 +243,7 @@ function buildPlan(exportObj){
   }
 
   // Buys: for each target ticker, compute delta value vs current, convert to quantity using currentPrice
-  for (const tgt of targets){
+  if (!FLAG_SELLS_ONLY) for (const tgt of targets){
     const cur = byTicker.get(tgt.ticker);
     const curVal = cur ? cur.currentValue : 0;
     const targetVal = total * tgt.pct;
