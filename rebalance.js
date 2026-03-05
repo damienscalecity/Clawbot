@@ -258,10 +258,40 @@ function buildPlan(exportObj){
       continue;
     }
     const qty = need / px;
-    plan.buys.push({ticker:tgt.ticker, quantity: qty});
+    plan.buys.push({ticker:tgt.ticker, quantity: qty, estPrice: px, estCost: qty * px, deficitValue: need});
   }
 
-  // sort orders by size heuristic: sells first, then trims, then buys
+  // If buys-only, cap the basket to available free cash (market orders)
+  if (FLAG_BUYS_ONLY) {
+    const freeCash = Number(exportObj.cash?.free || 0);
+    const budget = Math.max(0, freeCash * 0.98); // keep a little buffer
+    // prioritize largest deficitValue first
+    plan.buys.sort((a,b)=> (b.deficitValue||0) - (a.deficitValue||0));
+    const kept = [];
+    let spent = 0;
+    for (const b of plan.buys) {
+      if (spent >= budget) break;
+      const cost = Number(b.estCost || 0);
+      if (cost <= 0) continue;
+      if (spent + cost <= budget) {
+        kept.push(b);
+        spent += cost;
+        continue;
+      }
+      // partial fill for last order
+      const remaining = budget - spent;
+      const px = Number(b.estPrice || 0);
+      if (px > 0 && remaining > px*0.001) {
+        const partialQty = remaining / px;
+        kept.push({...b, quantity: partialQty, estCost: remaining});
+        spent += remaining;
+      }
+      break;
+    }
+    plan.notes.push(`BUY budget: freeCash=${freeCash.toFixed(2)}, used≈${spent.toFixed(2)} (buffer 2%)`);
+    plan.buys = kept;
+  }
+
   return plan;
 }
 
