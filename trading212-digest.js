@@ -23,6 +23,7 @@ const https = require('https');
 
 const args = process.argv.slice(2);
 const FLAG_PRINT_POSITION_KEYS = args.includes('--print-position-keys');
+const FLAG_EXPORT_ANALYSIS = args.includes('--export-analysis');
 const FLAG_SAFE = args.includes('--safe') || FLAG_PRINT_POSITION_KEYS;
 
 const STATE_PATH = path.resolve('/data/.openclaw/workspace/memory/portfolio-state.json');
@@ -75,16 +76,42 @@ function releaseLock(fd){
   try{ fs.unlinkSync(LOCK_PATH); }catch(e){}
 }
 
-function fetchWithFallback(url, headers){
+function lowerCaseHeaders(headersObj){
+  const out = {};
+  if (!headersObj) return out;
+  for (const [k,v] of Object.entries(headersObj)) out[String(k).toLowerCase()] = v;
+  return out;
+}
+
+function parseResetSeconds(resetHeader){
+  // T212 docs mention x-ratelimit-reset (usually seconds until reset or epoch seconds). We'll support both.
+  if (resetHeader == null) return null;
+  const n = Number(resetHeader);
+  if (!Number.isFinite(n)) return null;
+  // heuristic: if huge, treat as epoch seconds
+  if (n > 10_000_000_000) return Math.max(0, Math.floor(n/1000) - nowTs());
+  if (n > 1_000_000_000) return Math.max(0, Math.floor(n) - nowTs());
+  // else treat as seconds-until-reset
+  return Math.max(0, Math.floor(n));
+}
+
+async function fetchWithFallback(url, headers){
   if (typeof fetch === 'function') {
-    return fetch(url, {method:'GET', headers}).then(async res=>{
-      const status = res.status;
-      const text = await res.text();
-      let json = null;
-      try{ json = JSON.parse(text); }catch(e){ json = null; }
-      return {status, json, text};
-    });
+    const res = await fetch(url, {method:'GET', headers});
+    const status = res.status;
+    const text = await res.text();
+    let json = null;
+    try{ json = JSON.parse(text); }catch(e){ json = null; }
+
+    const h = {};
+    try{
+      // node fetch Headers iterable
+      for (const [k,v] of res.headers.entries()) h[k] = v;
+    }catch(e){}
+
+    return {status, json, text, headers: lowerCaseHeaders(h)};
   }
+
   // fallback to https.request
   return new Promise((resolve, reject)=>{
     const u = new URL(url);
@@ -102,7 +129,7 @@ function fetchWithFallback(url, headers){
         const text = Buffer.concat(bufs).toString('utf8');
         let json = null;
         try{ json = JSON.parse(text); }catch(e){ json = null; }
-        resolve({status: res.statusCode, json, text});
+        resolve({status: res.statusCode, json, text, headers: lowerCaseHeaders(res.headers)});
       });
     });
     req.on('error', reject);
@@ -110,18 +137,49 @@ function fetchWithFallback(url, headers){
   });
 }
 
+async function fetchWithRateLimit(url, headers, {maxRetries=2, label=''} = {}){
+  let attempt = 0;
+  while (true){
+    const resp = await fetchWithFallback(url, headers);
+
+    const resetS = parseResetSeconds(resp.headers && resp.headers['x-ratelimit-reset']);
+    const remaining = resp.headers && resp.headers['x-ratelimit-remaining'] != null
+      ? Number(resp.headers['x-ratelimit-remaining'])
+      : null;
+
+    if (resp.status !== 429) {
+      // If we're close to the limit, add a tiny delay to be polite
+      if (Number.isFinite(remaining) && remaining <= 1 && Number.isFinite(resetS) && resetS > 0) {
+        await wait(Math.min(2000, resetS * 1000));
+      }
+      return resp;
+    }
+
+    if (attempt >= maxRetries) return resp;
+
+    const sleepMs = (Number.isFinite(resetS) && resetS > 0)
+      ? (resetS * 1000 + 250)
+      : 2000;
+
+    // minimal log (no sensitive data)
+    console.log(`RateLimit(429)${label?` ${label}`:''}: attente ${Math.ceil(sleepMs/1000)}s`);
+    await wait(sleepMs);
+    attempt++;
+  }
+}
+
 async function callChainOnce(){
   const headers = {'Authorization': authHeader, 'Accept':'application/json'};
   const results = {errors:[]};
   // cash
-  const cashResp = await fetchWithFallback(BASE + CASH_PATH, headers);
+  const cashResp = await fetchWithRateLimit(BASE + CASH_PATH, headers, {label:'cash'});
   results.cash = cashResp;
   if ([429,401,403].includes(cashResp.status)) {
     results.errors.push({status: cashResp.status, endpoint: CASH_PATH});
     return results;
   }
-  await wait(15000);
-  const posResp = await fetchWithFallback(BASE + POS_PATH, headers);
+  // positions
+  const posResp = await fetchWithRateLimit(BASE + POS_PATH, headers, {label:'positions'});
   results.positions = posResp;
   if ([429,401,403].includes(posResp.status)) {
     results.errors.push({status: posResp.status, endpoint: POS_PATH});
@@ -263,6 +321,52 @@ function formatPct(x){
 
   const cashJson = res.cash.json;
   const posJson = res.positions.json;
+
+  // Export analysis locally (can include amounts) but prints nothing sensitive to stdout
+  if (FLAG_EXPORT_ANALYSIS) {
+    const outPath = path.resolve('/data/.openclaw/workspace/memory/portfolio-analysis.json');
+
+    const arr = Array.isArray(posJson)
+      ? posJson
+      : (posJson && Array.isArray(posJson.positions))
+        ? posJson.positions
+        : [];
+
+    // Build a rich export per raw position line (no merging)
+    const rawPositions = arr.map(p => {
+      const instr = (p && typeof p.instrument === 'object') ? p.instrument : null;
+      const ticker =
+        pickFirstString(p, ['ticker','symbol','instrumentCode','code']) ||
+        pickFirstString(instr, ['ticker','symbol','instrumentCode','code']) ||
+        pickFirstString(p, ['instrument']);
+
+      return {
+        ticker,
+        instrument: instr || p.instrument || null,
+        quantity: p.quantity ?? null,
+        currentPrice: p.currentPrice ?? null,
+        averagePricePaid: p.averagePricePaid ?? null,
+        walletImpact: p.walletImpact ?? null,
+        createdAt: p.createdAt ?? null,
+      };
+    });
+
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      cash: cashJson,
+      positionsRaw: rawPositions
+    };
+
+    try {
+      fs.mkdirSync(path.dirname(outPath), {recursive:true});
+      fs.writeFileSync(outPath, JSON.stringify(payload, null, 2), 'utf8');
+      console.log('OK: export local écrit (memory/portfolio-analysis.json).');
+    } catch (e) {
+      console.log('Erreur: export local impossible.');
+      process.exitCode = 1;
+    }
+    process.exit(0);
+  }
 
   // SAFE MODE: only print field names/types from one position object
   if (FLAG_PRINT_POSITION_KEYS) {
