@@ -188,12 +188,9 @@ function computePositionsList(posJson){
     const ccy = pickFirstString(p && p.walletImpact, ['currency']);
     if (ccy) currencies.add(ccy);
 
-    // Prefer walletImpact.currentValue (seems to be the correct position value in wallet/account currency)
-    const value =
+    const currentValue =
       pickFirstNumber(p && p.walletImpact, ['currentValue']) ??
-      // Fallback: explicit market value fields
       pickFirstNumber(p, ['marketValue','marketValueInAccountCurrency','currentValue','currentValueInAccountCurrency','value','valueInAccountCurrency']) ??
-      // Fallback: qty * price
       (() => {
         const qty = pickFirstNumber(p, ['quantity','qty']);
         const price = pickFirstNumber(p, ['currentPrice','lastPrice','averagePrice']);
@@ -201,17 +198,26 @@ function computePositionsList(posJson){
         return 0;
       })();
 
+    const upl = pickFirstNumber(p && p.walletImpact, ['unrealizedProfitLoss']);
+
     if (!ticker) continue;
-    list.push({ticker, value: Number(value)||0});
+    list.push({ticker, value: Number(currentValue)||0, upl: (upl==null? null : Number(upl))});
   }
 
   // merge by ticker
   const map = new Map();
   for (const it of list){
-    map.set(it.ticker, (map.get(it.ticker)||0) + (Number(it.value)||0));
+    const prev = map.get(it.ticker);
+    if (!prev) map.set(it.ticker, {ticker: it.ticker, value: it.value, upl: it.upl});
+    else {
+      prev.value += (Number(it.value)||0);
+      // upl can be null if missing on some lines; only sum when both sides are numbers
+      if (Number.isFinite(prev.upl) && Number.isFinite(it.upl)) prev.upl += it.upl;
+      else if (!Number.isFinite(prev.upl) && Number.isFinite(it.upl)) prev.upl = it.upl;
+    }
   }
 
-  const merged = Array.from(map.entries()).map(([ticker,value])=>({ticker, value}));
+  const merged = Array.from(map.values());
   merged.sort((a,b)=>b.value - a.value);
   return {positions: merged, currencies: Array.from(currencies)};
 }
@@ -308,7 +314,7 @@ function formatPct(x){
   if (total == null) total = (Number(free)||0) + sumPos;
   if (free == null) free = 0;
 
-  // prepare top3
+  // prepare top3 (by value)
   const top3 = positions.slice(0,3);
   const top1 = top3[0] || {value:0};
   const top3sum = top3.reduce((s,p)=>s + (p.value||0), 0);
@@ -332,7 +338,7 @@ function formatPct(x){
   if (state.snapshots.length > 60) state.snapshots = state.snapshots.slice(state.snapshots.length-60);
   writeState(state);
 
-  // Compose short French digest (max ~8 lines)
+  // Compose short French digest (focus performance)
   const lines = [];
   const sign = delta==null ? '' : (delta>=0?'+':'') + (delta/1).toFixed(2);
 
@@ -340,17 +346,33 @@ function formatPct(x){
   const ccyLabel = (currencies && currencies.length === 1) ? currencies[0] : 'EUR';
   const ccyNote = (currencies && currencies.length > 1) ? ` (devises: ${currencies.join(',')})` : '';
 
-  lines.push(`Total: ${total.toFixed(2)} ${ccyLabel} ${delta!=null?`(${sign})`:''}${ccyNote}`);
-  lines.push(`Cash libre: ${free.toFixed(2)} ${ccyLabel}`);
+  // Performance / summary
+  lines.push(`Portefeuille: ${total.toFixed(2)} ${ccyLabel} ${delta!=null?`(${sign})`:''}${ccyNote}`);
+  lines.push(`Cash: ${free.toFixed(2)} ${ccyLabel}`);
+
+  // Top positions by weight (kept short)
   for (let i=0;i<3;i++){
     const p = top3[i];
-    if (p) lines.push(`${i+1}. ${p.ticker} ${p.value.toFixed(2)} (${formatPct(total? p.value/total : 0)})`);
+    if (p) lines.push(`${i+1}. ${p.ticker} — ${formatPct(total? p.value/total : 0)}`);
     else lines.push(`${i+1}. -`);
   }
-  lines.push(`Concentration: Top1 ${formatPct(conc1)}, Top3 ${formatPct(conc3)}`);
-  if (conc1 > 0.25) lines.push(`ALERTE: ${top1.ticker} > 25%`);
-  else lines.push(``);
-  lines.push(`Action: rien`);
+
+  // P&L latent (if available)
+  const withUpl = positions.filter(p => Number.isFinite(p.upl));
+  if (withUpl.length) {
+    const totalUpl = withUpl.reduce((s,p)=>s + (p.upl||0), 0);
+    lines.push(`P&L latent: ${(totalUpl>=0?'+':'')}${totalUpl.toFixed(2)} ${ccyLabel}`);
+
+    // worst/best contributor (by absolute upl)
+    const sortedUpl = withUpl.slice().sort((a,b)=> (b.upl||0) - (a.upl||0));
+    const best = sortedUpl[0];
+    const worst = sortedUpl[sortedUpl.length-1];
+    if (best) lines.push(`Meilleur: ${best.ticker} ${(best.upl>=0?'+':'')}${best.upl.toFixed(2)} ${ccyLabel}`);
+    if (worst) lines.push(`Pire: ${worst.ticker} ${(worst.upl>=0?'+':'')}${worst.upl.toFixed(2)} ${ccyLabel}`);
+  }
+
+  // (Optional) risk line if concentrated
+  if (conc1 > 0.25) lines.push(`Note: Concentration élevée (${top1.ticker} ${formatPct(conc1)})`);
 
   const finalLines = lines.filter((l,i)=>!(l==='' && i>6));
   console.log(finalLines.join('\n'));
