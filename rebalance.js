@@ -260,13 +260,23 @@ function buildPlan(exportObj){
   return plan;
 }
 
+function normalizeQuantity(q){
+  // Best-effort: many instruments accept up to 3 decimal places for fractional shares.
+  // We truncate (not round) to avoid accidentally selling more than owned.
+  const sign = q < 0 ? -1 : 1;
+  const abs = Math.abs(Number(q));
+  const truncated = Math.floor(abs * 1000) / 1000;
+  return sign * truncated;
+}
+
 async function placeMarketOrder(authHeader, ticker, quantity){
   const headers = {
     'Authorization': authHeader,
     'Accept': 'application/json',
     'Content-Type': 'application/json'
   };
-  const body = {ticker, quantity};
+  const qty = normalizeQuantity(quantity);
+  const body = {ticker, quantity: qty};
   if (process.env.EXTENDED_HOURS === '1') body.extendedHours = true;
   const url = BASE + ORDERS_MARKET_PATH;
   return fetchWithRateLimit('POST', url, headers, body, {label:`order:${ticker}`});
@@ -301,7 +311,7 @@ async function placeMarketOrder(authHeader, ticker, quantity){
   const toSend = [];
   for (const o of [...plan.sells, ...plan.trims, ...plan.buys]){
     // fingerprint (best-effort)
-    const fp = `${o.ticker}:${Number(o.quantity).toFixed(8)}`;
+    const fp = `${o.ticker}:${Number(normalizeQuantity(o.quantity)).toFixed(3)}`;
     if (already.has(fp)) continue;
     toSend.push({...o, fingerprint: fp});
   }
