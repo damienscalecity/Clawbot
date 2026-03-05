@@ -174,6 +174,7 @@ function computePositionsList(posJson){
       : [];
 
   const list = [];
+  const currencies = new Set();
 
   for (const p of arr){
     // ticker can be nested (instrument object) depending on API version
@@ -183,6 +184,9 @@ function computePositionsList(posJson){
       pickFirstString(p, ['ticker','symbol','instrumentCode','code']) ||
       pickFirstString(instr, ['ticker','symbol','instrumentCode','code']) ||
       pickFirstString(p, ['instrument']);
+
+    const ccy = pickFirstString(p && p.walletImpact, ['currency']);
+    if (ccy) currencies.add(ccy);
 
     // Prefer walletImpact.currentValue (seems to be the correct position value in wallet/account currency)
     const value =
@@ -209,7 +213,7 @@ function computePositionsList(posJson){
 
   const merged = Array.from(map.entries()).map(([ticker,value])=>({ticker, value}));
   merged.sort((a,b)=>b.value - a.value);
-  return merged;
+  return {positions: merged, currencies: Array.from(currencies)};
 }
 
 function formatPct(x){
@@ -296,7 +300,9 @@ function formatPct(x){
 
   let total = extractCashTotal(cashJson);
   let free = extractCashFree(cashJson);
-  const positions = computePositionsList(posJson);
+  const computed = computePositionsList(posJson);
+  const positions = computed.positions;
+  const currencies = computed.currencies;
 
   const sumPos = positions.reduce((s,p)=>s + (p.value||0), 0);
   if (total == null) total = (Number(free)||0) + sumPos;
@@ -329,8 +335,13 @@ function formatPct(x){
   // Compose short French digest (max ~8 lines)
   const lines = [];
   const sign = delta==null ? '' : (delta>=0?'+':'') + (delta/1).toFixed(2);
-  lines.push(`Total: ${total.toFixed(2)} EUR ${delta!=null?`(${sign})`:''}`);
-  lines.push(`Cash libre: ${free.toFixed(2)} EUR`);
+
+  // If API reports position values in a currency, reflect it (avoid hardcoding EUR)
+  const ccyLabel = (currencies && currencies.length === 1) ? currencies[0] : 'EUR';
+  const ccyNote = (currencies && currencies.length > 1) ? ` (devises: ${currencies.join(',')})` : '';
+
+  lines.push(`Total: ${total.toFixed(2)} ${ccyLabel} ${delta!=null?`(${sign})`:''}${ccyNote}`);
+  lines.push(`Cash libre: ${free.toFixed(2)} ${ccyLabel}`);
   for (let i=0;i<3;i++){
     const p = top3[i];
     if (p) lines.push(`${i+1}. ${p.ticker} ${p.value.toFixed(2)} (${formatPct(total? p.value/total : 0)})`);
