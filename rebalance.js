@@ -266,7 +266,8 @@ async function placeMarketOrder(authHeader, ticker, quantity){
     'Accept': 'application/json',
     'Content-Type': 'application/json'
   };
-  const body = {ticker, quantity, extendedHours: true};
+  const body = {ticker, quantity};
+  if (process.env.EXTENDED_HOURS === '1') body.extendedHours = true;
   const url = BASE + ORDERS_MARKET_PATH;
   return fetchWithRateLimit('POST', url, headers, body, {label:`order:${ticker}`});
 }
