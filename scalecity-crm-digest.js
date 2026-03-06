@@ -20,9 +20,32 @@ const args = process.argv.slice(2);
 const hours = Number((args.find(a=>a.startsWith('--hours='))||'').split('=')[1] || '24');
 const orgId = (args.find(a=>a.startsWith('--org='))||'').split('=')[1] || null;
 const leadSampleLimit = Number((args.find(a=>a.startsWith('--lead-sample-limit='))||'').split('=')[1] || '10');
+const FLAG_MAURITIUS_DAY = args.includes('--mauritius-day');
 
 function sinceIso(hoursBack){
   return new Date(Date.now() - hoursBack*3600*1000).toISOString();
+}
+
+function mauritiusDayWindowUtc(refDate = new Date()){
+  // Mauritius is UTC+4 year-round.
+  const offsetMs = 4 * 3600 * 1000;
+  const mutNow = new Date(refDate.getTime() + offsetMs);
+  // window for "yesterday" in MUT: [00:00, 24:00)
+  const y = mutNow.getUTCFullYear();
+  const m = mutNow.getUTCMonth();
+  const d = mutNow.getUTCDate();
+  const startMut = new Date(Date.UTC(y, m, d) - 24*3600*1000); // yesterday 00:00 MUT in MUT-clock
+  const endMut = new Date(Date.UTC(y, m, d)); // today 00:00 MUT
+  // convert MUT-clock instants back to UTC by subtracting offset
+  const startUtc = new Date(startMut.getTime() - offsetMs);
+  const endUtc = new Date(endMut.getTime() - offsetMs);
+  return {startUtc, endUtc};
+}
+
+function inWindow(iso, startUtc, endUtc){
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  return t >= startUtc.getTime() && t < endUtc.getTime();
 }
 
 function getJson(url){
@@ -68,7 +91,18 @@ function canonicalCampaignKey(name){
 }
 
 (async function main(){
-  const since = sinceIso(hours);
+  // Time window
+  let since;
+  let windowStartUtc = null;
+  let windowEndUtc = null;
+  if (FLAG_MAURITIUS_DAY) {
+    const w = mauritiusDayWindowUtc(new Date());
+    windowStartUtc = w.startUtc;
+    windowEndUtc = w.endUtc;
+    since = w.startUtc.toISOString();
+  } else {
+    since = sinceIso(hours);
+  }
   const u = new URL(BASE);
   u.searchParams.set('sections', 'statistics,lead_lists');
   u.searchParams.set('since', since);
@@ -96,7 +130,11 @@ function canonicalCampaignKey(name){
   const negoc = Number(breakdown.en_cours_de_negociation || 0);
 
   const lines = [];
-  lines.push(`CRM Digest (${hours}h) — leads: ${totalLeads}, CA: ${revenue}€`);
+  if (FLAG_MAURITIUS_DAY && windowStartUtc && windowEndUtc) {
+    lines.push(`CRM Digest (hier — jour Maurice) — fenêtre UTC: ${windowStartUtc.toISOString()} → ${windowEndUtc.toISOString()}`);
+  } else {
+    lines.push(`CRM Digest (${hours}h) — leads: ${totalLeads}, CA: ${revenue}€`);
+  }
   lines.push(`Conv RDV: ${fmtPct(crRdv)} | Conv vendu: ${fmtPct(crVendu)}`);
 
   // Key alerts
@@ -136,8 +174,16 @@ function canonicalCampaignKey(name){
     const lists = rLists.json.lead_lists;
     const listNameById = new Map(lists.map(l => [l.id, l.name || l.id]));
 
-    const leads24 = r2.json.leads;
-    const leads7d = r7.json.leads;
+    let leads24 = r2.json.leads;
+    let leads7d = r7.json.leads;
+
+    if (FLAG_MAURITIUS_DAY && windowStartUtc && windowEndUtc) {
+      // Filter to yesterday's MUT day window
+      leads24 = leads24.filter(l => inWindow(l.created_at, windowStartUtc, windowEndUtc));
+      // For 7d baseline, use last 7 full MUT days ending at windowEndUtc
+      const start7 = new Date(windowEndUtc.getTime() - 7*24*3600*1000);
+      leads7d = leads7d.filter(l => inWindow(l.created_at, start7, windowEndUtc));
+    }
 
     const n24 = new Map();
     const n7 = new Map();
