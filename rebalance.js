@@ -138,6 +138,11 @@ function mergeByTicker(exportObj){
   return {total, merged};
 }
 
+function parseFreezeTickers(){
+  const raw = process.env.FREEZE_TICKERS || '';
+  return new Set(raw.split(',').map(s=>s.trim()).filter(Boolean));
+}
+
 function buildTargets(){
   // Hard-coded target model per conversation.
   // Core: 10 x 7% (GOOGL chosen over GOOG; MA chosen; no ETFs)
@@ -170,6 +175,7 @@ function buildTargets(){
 
 function buildPlan(exportObj){
   const {total, merged} = mergeByTicker(exportObj);
+  const freeze = parseFreezeTickers();
   const {targets} = buildTargets();
   const targetMap = new Map(targets.map(t=>[t.ticker, t.pct]));
 
@@ -229,7 +235,7 @@ function buildPlan(exportObj){
 
   // PLTR trim: target 5% (can be disabled via STOP_PLTR=1)
   const pltr = byTicker.get('PLTR_US_EQ');
-  if (!FLAG_BUYS_ONLY && process.env.STOP_PLTR !== '1' && pltr){
+  if (!FLAG_BUYS_ONLY && process.env.STOP_PLTR !== '1' && !freeze.has('PLTR_US_EQ') && pltr){
     const targetValue = total * 0.05;
     const excessValue = pltr.currentValue - targetValue;
     if (excessValue > 1){
@@ -249,6 +255,7 @@ function buildPlan(exportObj){
 
   // Buys: for each target ticker, compute delta value vs current, convert to quantity using currentPrice
   if (!FLAG_SELLS_ONLY) for (const tgt of targets){
+    if (freeze.has(tgt.ticker)) continue;
     const cur = byTicker.get(tgt.ticker);
     const curVal = cur ? cur.currentValue : 0;
     const targetVal = total * tgt.pct;
