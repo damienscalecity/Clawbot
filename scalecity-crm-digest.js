@@ -108,50 +108,73 @@ function canonicalCampaignKey(name){
   if (negoc > 0) alerts.push(`Négociation: ${negoc}`);
   if (alerts.length) lines.push('Focus: ' + alerts.join(' | '));
 
-  // Media-buyer view: campaigns with leads (24h) + campaigns that dropped to 0 vs last 7d
+  // Media-buyer view (recommended): leads by lead_list (list is the reference)
+  const uLists = new URL(BASE);
+  uLists.searchParams.set('sections', 'lead_lists');
+  uLists.searchParams.set('since', sinceIso(24*30));
+  uLists.searchParams.set('limit', '500');
+  if (orgId) uLists.searchParams.set('organization_id', orgId);
+
   const u2 = new URL(BASE);
   u2.searchParams.set('sections', 'leads');
   u2.searchParams.set('since', since);
-  u2.searchParams.set('limit', '500');
+  u2.searchParams.set('limit', '2000');
   if (orgId) u2.searchParams.set('organization_id', orgId);
-  const r2 = await getJson(u2);
 
   const u7 = new URL(BASE);
   u7.searchParams.set('sections', 'leads');
   u7.searchParams.set('since', sinceIso(24*7));
-  u7.searchParams.set('limit', '2000');
+  u7.searchParams.set('limit', '5000');
   if (orgId) u7.searchParams.set('organization_id', orgId);
-  const r7 = await getJson(u7);
 
-  if (r2.status === 200 && r2.json && Array.isArray(r2.json.leads) && r7.status === 200 && r7.json && Array.isArray(r7.json.leads)) {
+  const [rLists, r2, r7] = await Promise.all([getJson(uLists), getJson(u2), getJson(u7)]);
+
+  if (rLists.status === 200 && rLists.json && Array.isArray(rLists.json.lead_lists) &&
+      r2.status === 200 && r2.json && Array.isArray(r2.json.leads) &&
+      r7.status === 200 && r7.json && Array.isArray(r7.json.leads)) {
+
+    const lists = rLists.json.lead_lists;
+    const listNameById = new Map(lists.map(l => [l.id, l.name || l.id]));
+
     const leads24 = r2.json.leads;
     const leads7d = r7.json.leads;
 
-    const c24 = new Map();
-    const c7 = new Set();
-    let unknown24 = 0;
+    const n24 = new Map();
+    const n7 = new Map();
+    let unknownList24 = 0;
 
     for (const l of leads24) {
-      const k = canonicalCampaignKey(l.campaign_name);
-      if (k === '(unknown)') unknown24++;
-      c24.set(k, (c24.get(k) || 0) + 1);
+      const id = l.lead_list_id || '(unknown)';
+      if (id === '(unknown)') unknownList24++;
+      n24.set(id, (n24.get(id) || 0) + 1);
     }
     for (const l of leads7d) {
-      const k = canonicalCampaignKey(l.campaign_name);
-      c7.add(k);
+      const id = l.lead_list_id || '(unknown)';
+      n7.set(id, (n7.get(id) || 0) + 1);
     }
 
-    const top = [...c24.entries()].sort((a,b)=>b[1]-a[1]).slice(0, 12);
-    const zeros = [...c7].filter(k => k !== '(unknown)' && !c24.has(k)).sort();
+    // Active definition: has at least 1 lead in last 7 days
+    const activeIds = new Set([...n7.keys()].filter(id => id !== '(unknown)' && (n7.get(id) || 0) > 0));
 
-    lines.push(`\nMedia Buyer (24h): ${leads24.length} leads | campagnes: ${c24.size}${unknown24?` | unknown: ${unknown24}`:''}`);
-    lines.push('Top campagnes (clé normalisée):');
-    for (const [k,v] of top) lines.push(`- ${k}: ${v}`);
+    const top = [...n24.entries()]
+      .filter(([id]) => id !== '(unknown)')
+      .sort((a,b)=>b[1]-a[1])
+      .slice(0, 12)
+      .map(([id,c]) => ({id, name: listNameById.get(id) || id, leads: c}));
 
-    if (zeros.length) {
-      lines.push(`Campagnes actives 7j mais 0 lead (24h): ${zeros.length}`);
-      for (const k of zeros.slice(0, 20)) lines.push(`- ${k}`);
-      if (zeros.length > 20) lines.push(`- (+${zeros.length-20} autres)`);
+    const zero24 = [...activeIds]
+      .filter(id => !n24.has(id))
+      .map(id => ({id, name: listNameById.get(id) || id, leads7d: n7.get(id) || 0}))
+      .sort((a,b)=> (b.leads7d - a.leads7d));
+
+    lines.push(`\nMedia Buyer (24h): ${leads24.length} leads | listes actives (7j): ${activeIds.size}${unknownList24?` | unknown lead_list_id: ${unknownList24}`:''}`);
+    lines.push('Top listes (24h):');
+    for (const t of top) lines.push(`- ${t.name}: ${t.leads}`);
+
+    if (zero24.length) {
+      lines.push(`Listes actives (7j) mais 0 lead (24h): ${zero24.length}`);
+      for (const z of zero24.slice(0, 20)) lines.push(`- ${z.name} (7j: ${z.leads7d})`);
+      if (zero24.length > 20) lines.push(`- (+${zero24.length-20} autres)`);
     }
   }
 
