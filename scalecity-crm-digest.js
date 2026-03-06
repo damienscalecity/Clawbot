@@ -167,14 +167,37 @@ function canonicalCampaignKey(name){
       .map(id => ({id, name: listNameById.get(id) || id, leads7d: n7.get(id) || 0}))
       .sort((a,b)=> (b.leads7d - a.leads7d));
 
+    // Top drops: compare 24h to 7d daily average
+    const drops = [...activeIds]
+      .map(id => {
+        const c24 = n24.get(id) || 0;
+        const c7 = n7.get(id) || 0;
+        const avg = c7 / 7;
+        const delta = c24 - avg;
+        const pct = avg > 0 ? (delta / avg) : null;
+        return {id, name: listNameById.get(id) || id, c24, avg, delta, pct, c7};
+      })
+      .filter(x => x.avg >= 1) // ignore tiny averages
+      .sort((a,b)=> a.delta - b.delta) // most negative first
+      .slice(0, 10);
+
     lines.push(`\nMedia Buyer (24h): ${leads24.length} leads | listes actives (7j): ${activeIds.size}${unknownList24?` | unknown lead_list_id: ${unknownList24}`:''}`);
     lines.push('Top listes (24h):');
     for (const t of top) lines.push(`- ${t.name}: ${t.leads}`);
 
+    if (drops.length) {
+      lines.push('Top chutes (24h vs moyenne/j 7j):');
+      for (const d of drops) {
+        const avg = d.avg.toFixed(1);
+        const pct = d.pct == null ? '' : ` (${(d.pct*100).toFixed(0)}%)`;
+        lines.push(`- ${d.name}: ${d.c24} vs ${avg}${pct}`);
+      }
+    }
+
     if (zero24.length) {
       lines.push(`Listes actives (7j) mais 0 lead (24h): ${zero24.length}`);
-      for (const z of zero24.slice(0, 20)) lines.push(`- ${z.name} (7j: ${z.leads7d})`);
-      if (zero24.length > 20) lines.push(`- (+${zero24.length-20} autres)`);
+      // full list (sorted by 7d volume)
+      for (const z of zero24) lines.push(`- ${z.name} (7j: ${z.leads7d})`);
     }
   }
 
