@@ -53,6 +53,20 @@ function pick(obj, key, def=null){
   return obj && obj[key] != null ? obj[key] : def;
 }
 
+function canonicalCampaignKey(name){
+  if (!name || typeof name !== 'string') return '(unknown)';
+  let s = name.trim();
+  if (!s) return '(unknown)';
+  // normalize dash variants
+  s = s.replace(/[–—]/g, '-');
+  // collapse whitespace
+  s = s.replace(/\s+/g, ' ');
+  // Prefer splitting on " - " (with spaces) to avoid breaking tickers like "A-B"
+  const parts = s.split(' - ').map(x=>x.trim()).filter(Boolean);
+  const head = parts.length ? parts[0] : s;
+  return head.toLowerCase();
+}
+
 (async function main(){
   const since = sinceIso(hours);
   const u = new URL(BASE);
@@ -94,33 +108,50 @@ function pick(obj, key, def=null){
   if (negoc > 0) alerts.push(`Négociation: ${negoc}`);
   if (alerts.length) lines.push('Focus: ' + alerts.join(' | '));
 
-  // Optional: pull a small sample of new/unassigned leads (no phone/email)
-  const needSample = (toAssign > 0 || newLeads > 0) && leadSampleLimit > 0;
-  if (needSample) {
-    const u2 = new URL(BASE);
-    u2.searchParams.set('sections', 'leads');
-    u2.searchParams.set('since', since);
-    u2.searchParams.set('limit', String(Math.min(100, leadSampleLimit)));
-    if (orgId) u2.searchParams.set('organization_id', orgId);
+  // Media-buyer view: campaigns with leads (24h) + campaigns that dropped to 0 vs last 7d
+  const u2 = new URL(BASE);
+  u2.searchParams.set('sections', 'leads');
+  u2.searchParams.set('since', since);
+  u2.searchParams.set('limit', '500');
+  if (orgId) u2.searchParams.set('organization_id', orgId);
+  const r2 = await getJson(u2);
 
-    const r2 = await getJson(u2);
-    if (r2.status === 200 && r2.json && Array.isArray(r2.json.leads)) {
-      const sample = r2.json.leads
-        .filter(l => ['a_attribuer','nouveau'].includes(l.status))
-        .slice(0, leadSampleLimit)
-        .map(l => ({
-          id: l.id,
-          status: l.status,
-          source: l.source || null,
-          form: l.form_name || null,
-          created_at: l.created_at || null,
-        }));
-      if (sample.length) {
-        lines.push(`Exemples à traiter (sans PII): ${sample.length}`);
-        for (const s of sample) {
-          lines.push(`- ${s.status} | ${s.source||'?'} | ${s.form||'?'} | ${String(s.id).slice(0,8)}`);
-        }
-      }
+  const u7 = new URL(BASE);
+  u7.searchParams.set('sections', 'leads');
+  u7.searchParams.set('since', sinceIso(24*7));
+  u7.searchParams.set('limit', '2000');
+  if (orgId) u7.searchParams.set('organization_id', orgId);
+  const r7 = await getJson(u7);
+
+  if (r2.status === 200 && r2.json && Array.isArray(r2.json.leads) && r7.status === 200 && r7.json && Array.isArray(r7.json.leads)) {
+    const leads24 = r2.json.leads;
+    const leads7d = r7.json.leads;
+
+    const c24 = new Map();
+    const c7 = new Set();
+    let unknown24 = 0;
+
+    for (const l of leads24) {
+      const k = canonicalCampaignKey(l.campaign_name);
+      if (k === '(unknown)') unknown24++;
+      c24.set(k, (c24.get(k) || 0) + 1);
+    }
+    for (const l of leads7d) {
+      const k = canonicalCampaignKey(l.campaign_name);
+      c7.add(k);
+    }
+
+    const top = [...c24.entries()].sort((a,b)=>b[1]-a[1]).slice(0, 12);
+    const zeros = [...c7].filter(k => k !== '(unknown)' && !c24.has(k)).sort();
+
+    lines.push(`\nMedia Buyer (24h): ${leads24.length} leads | campagnes: ${c24.size}${unknown24?` | unknown: ${unknown24}`:''}`);
+    lines.push('Top campagnes (clé normalisée):');
+    for (const [k,v] of top) lines.push(`- ${k}: ${v}`);
+
+    if (zeros.length) {
+      lines.push(`Campagnes actives 7j mais 0 lead (24h): ${zeros.length}`);
+      for (const k of zeros.slice(0, 20)) lines.push(`- ${k}`);
+      if (zeros.length > 20) lines.push(`- (+${zeros.length-20} autres)`);
     }
   }
 
